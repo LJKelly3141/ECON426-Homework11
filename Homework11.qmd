@@ -1,0 +1,511 @@
+---
+title: "ECON426: Time Series Regression and Forecasting"
+format:
+  docx:
+    toc: false
+    number-sections: false
+---
+
+::: {.callout-note}
+## Assignment Overview: Steps to Complete
+
+1. Load necessary R packages and time series data.
+2. Explore and visualize time series properties.
+3. Test for stationarity using Augmented Dickey-Fuller tests.
+4. Estimate autoregressive (AR) models.
+5. Estimate distributed lag models.
+6. Test for serial correlation in residuals.
+7. Apply HAC standard errors for robust inference.
+8. Generate and evaluate forecasts.
+9. Submit your R code, outputs, plots, and written answers.
+:::
+
+# Case Study: Forecasting U.S. GDP Growth
+
+This assignment introduces time series regression methods using U.S. macroeconomic data. You will learn to model GDP growth, test for stationarity, estimate autoregressive models, and generate forecasts.
+
+We will use data from the Federal Reserve Economic Data (FRED) database to analyze quarterly GDP growth and its relationship with other economic indicators. The data has been pre-downloaded and is available in the `data/` folder.
+
+---
+
+# Instructions
+
+Follow each section carefully, complete the code exercises, and answer the interpretation questions.
+
+# 1. Load Required Packages and Data
+
+```{r}
+if (!require("pacman")) install.packages("pacman")
+
+pacman::p_load(
+  tidyverse,
+  quantmod,
+  tseries,
+  urca,
+  lmtest,
+  sandwich,
+  forecast,
+  dynlm,
+  zoo,
+  knitr
+)
+```
+
+## 1.1 Load Data
+
+```{r}
+#| message: false
+#| warning: false
+
+# Load GDP growth rate data from local data folder
+gdp_data <- read.csv("data/A191RL1Q225SBEA.csv")
+
+# Convert date column
+gdp_data$date <- as.Date(gdp_data$date)
+
+# Examine the data
+head(gdp_data)
+tail(gdp_data)
+```
+
+## 1.2 Create Analysis Dataset
+
+```{r}
+# Create analysis data frame
+macro_df <- gdp_data %>%
+  rename(gdp_growth = A191RL1Q225SBEA) %>%
+  drop_na()
+
+# View the data
+cat("Sample period:", as.character(min(macro_df$date)), "to", as.character(max(macro_df$date)), "\n")
+cat("Number of observations:", nrow(macro_df), "\n")
+head(macro_df)
+```
+
+**Question 1:** What is the sample period for your data? How many quarterly observations do you have?
+
+# 2. Exploratory Data Analysis
+
+**Objective:**
+Visualize and understand the time series properties of the data.
+
+## 2.1 Time Series Plots
+
+```{r}
+# Plot GDP growth
+ggplot(macro_df, aes(x = date, y = gdp_growth)) +
+  geom_line(color = "blue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(x = "Date", y = "GDP Growth Rate (%)",
+       title = "U.S. Real GDP Growth (Quarterly, SAAR)") +
+  theme_minimal()
+```
+
+```{r}
+# Highlight recessions (negative growth periods)
+ggplot(macro_df, aes(x = date, y = gdp_growth)) +
+  geom_col(aes(fill = gdp_growth > 0), show.legend = FALSE) +
+  scale_fill_manual(values = c("red", "steelblue")) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black") +
+  labs(x = "Date", y = "GDP Growth Rate (%)",
+       title = "U.S. Real GDP Growth: Expansions vs Contractions") +
+  theme_minimal()
+```
+
+## 2.2 Summary Statistics
+
+```{r}
+summary(macro_df$gdp_growth)
+
+# Additional statistics
+cat("\nStandard deviation:", round(sd(macro_df$gdp_growth), 2), "\n")
+cat("Number of negative quarters:", sum(macro_df$gdp_growth < 0), "\n")
+cat("Percent negative:", round(100 * mean(macro_df$gdp_growth < 0), 1), "%\n")
+```
+
+## 2.3 Autocorrelation Function
+
+```{r}
+# ACF and PACF for GDP growth
+par(mfrow = c(1, 2))
+acf(macro_df$gdp_growth, main = "ACF of GDP Growth")
+pacf(macro_df$gdp_growth, main = "PACF of GDP Growth")
+par(mfrow = c(1, 1))
+```
+
+**Question 2:**
+a) Describe the time series pattern of GDP growth. Does it appear stationary?
+b) What does the ACF plot tell you about the persistence of GDP growth?
+
+# 3. Testing for Stationarity
+
+**Objective:**
+Determine whether the time series are stationary using formal tests.
+
+## 3.1 Augmented Dickey-Fuller Test
+
+```{r}
+# ADF test for GDP growth
+adf_gdp <- adf.test(macro_df$gdp_growth)
+print(adf_gdp)
+```
+
+## 3.2 More Detailed ADF Test (using urca)
+
+```{r}
+# ADF test with automatic lag selection
+adf_detailed <- ur.df(macro_df$gdp_growth, type = "drift", selectlags = "AIC")
+summary(adf_detailed)
+```
+
+**Interpretation:**
+- **Null hypothesis**: Series has a unit root (non-stationary)
+- **Alternative**: Series is stationary
+- Reject null if test statistic < critical value (or p-value < 0.05)
+
+**Question 3:**
+a) Report the ADF test statistic and p-value for GDP growth.
+b) Does GDP growth appear to be stationary? Explain your reasoning.
+c) Why is it important to test for stationarity before estimating time series models?
+
+# 4. Autoregressive Models
+
+**Objective:**
+Estimate AR models for GDP growth forecasting.
+
+## 4.1 AR(1) Model
+
+$$Y_t = \beta_0 + \beta_1 Y_{t-1} + \epsilon_t$$
+
+```{r}
+# Create lagged variables
+macro_df <- macro_df %>%
+  mutate(
+    gdp_lag1 = lag(gdp_growth, 1),
+    gdp_lag2 = lag(gdp_growth, 2),
+    gdp_lag3 = lag(gdp_growth, 3),
+    gdp_lag4 = lag(gdp_growth, 4)
+  )
+
+# AR(1) model
+ar1_model <- lm(gdp_growth ~ gdp_lag1, data = macro_df)
+summary(ar1_model)
+```
+
+## 4.2 AR(4) Model
+
+Including four lags captures potential quarterly patterns:
+
+```{r}
+# AR(4) model
+ar4_model <- lm(gdp_growth ~ gdp_lag1 + gdp_lag2 + gdp_lag3 + gdp_lag4,
+                data = macro_df)
+summary(ar4_model)
+```
+
+## 4.3 Model Selection
+
+```{r}
+# Compare models using AIC and BIC
+models <- list(
+  "AR(1)" = ar1_model,
+  "AR(4)" = ar4_model
+)
+
+model_comparison <- data.frame(
+  Model = names(models),
+  AIC = sapply(models, AIC),
+  BIC = sapply(models, BIC),
+  Adj_R2 = sapply(models, function(m) summary(m)$adj.r.squared)
+)
+
+kable(model_comparison, digits = 2, caption = "Model Comparison")
+```
+
+**Question 4:**
+a) Interpret the AR(1) coefficient. What does it tell us about GDP growth persistence?
+b) Which model is preferred according to AIC? According to BIC?
+c) What is the interpretation if the AR(1) coefficient is between 0 and 1?
+
+# 5. Dynamic Multipliers
+
+**Objective:**
+Understand how shocks to GDP growth propagate over time.
+
+## 5.1 Impulse Response Function
+
+For an AR(1) model $Y_t = c + \phi Y_{t-1} + \epsilon_t$, a one-unit shock at time $t$ has effects:
+
+- Period $t$: Effect = 1
+- Period $t+1$: Effect = $\phi$
+- Period $t+2$: Effect = $\phi^2$
+- Period $t+h$: Effect = $\phi^h$
+
+```{r}
+# Get AR(1) coefficient
+phi <- coef(ar1_model)["gdp_lag1"]
+
+# Calculate impulse responses
+horizons <- 0:12
+impulse_response <- phi^horizons
+
+# Create data frame for plotting
+irf_df <- data.frame(
+  horizon = horizons,
+  response = impulse_response
+)
+
+# Plot impulse response
+ggplot(irf_df, aes(x = horizon, y = response)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_point(color = "blue", size = 2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Quarters After Shock", y = "Response",
+       title = "Impulse Response Function: AR(1) Model",
+       subtitle = paste0("AR(1) coefficient = ", round(phi, 3))) +
+  scale_x_continuous(breaks = 0:12) +
+  theme_minimal()
+```
+
+## 5.2 Cumulative Multiplier
+
+The cumulative effect after $h$ periods is:
+$$\sum_{j=0}^{h} \phi^j = \frac{1 - \phi^{h+1}}{1 - \phi}$$
+
+```{r}
+# Calculate cumulative multipliers
+cumulative <- cumsum(impulse_response)
+
+# Long-run multiplier (as h -> infinity)
+long_run <- 1 / (1 - phi)
+
+cat("Cumulative effect after 4 quarters:", round(cumulative[5], 3), "\n")
+cat("Cumulative effect after 8 quarters:", round(cumulative[9], 3), "\n")
+cat("Long-run multiplier:", round(long_run, 3), "\n")
+```
+
+**Question 5:**
+a) Interpret the AR(1) coefficient in terms of persistence. What fraction of a shock remains after one quarter?
+b) After how many quarters does the effect of a shock become negligible (less than 10% of original)?
+c) Why is the long-run multiplier larger than 1 when the AR coefficient is positive?
+
+# 6. Testing for Serial Correlation
+
+**Objective:**
+Check whether model residuals are autocorrelated.
+
+## 6.1 Breusch-Godfrey Test
+
+```{r}
+# Test AR(1) residuals for serial correlation (up to 4 lags)
+bgtest(ar1_model, order = 4)
+```
+
+```{r}
+# Test AR(4) model residuals
+bgtest(ar4_model, order = 4)
+```
+
+## 6.2 Durbin-Watson Test
+
+```{r}
+# Durbin-Watson test
+dwtest(ar1_model)
+```
+
+**Interpretation:**
+- **Null hypothesis**: No serial correlation
+- Significant p-value indicates serial correlation is present
+
+**Question 6:**
+a) Do the AR(1) model residuals exhibit serial correlation?
+b) What problems does serial correlation cause for inference?
+c) How might you address serial correlation if it's present?
+
+# 7. HAC Standard Errors
+
+**Objective:**
+Use heteroskedasticity and autocorrelation consistent (HAC) standard errors.
+
+## 7.1 Compare Standard Errors
+
+```{r}
+# OLS standard errors
+se_ols <- sqrt(diag(vcov(ar4_model)))
+
+# HAC standard errors (Newey-West)
+se_hac <- sqrt(diag(NeweyWest(ar4_model)))
+
+# Comparison table
+se_comparison <- data.frame(
+  Variable = names(se_ols),
+  SE_OLS = se_ols,
+  SE_HAC = se_hac,
+  Ratio = se_hac / se_ols
+)
+
+kable(se_comparison, digits = 4, caption = "OLS vs HAC Standard Errors")
+```
+
+## 7.2 Robust Inference
+
+```{r}
+# Coefficient test with HAC standard errors
+coeftest(ar4_model, vcov = NeweyWest)
+```
+
+**Question 7:**
+a) How do the HAC standard errors compare to OLS standard errors?
+b) Why are HAC standard errors important for time series regression?
+c) Does using HAC standard errors change any conclusions about significance?
+
+# 8. Forecasting
+
+**Objective:**
+Generate and evaluate out-of-sample forecasts.
+
+## 8.1 Split Sample
+
+```{r}
+# Use last 8 quarters for testing
+n <- nrow(na.omit(macro_df))
+train_end <- n - 8
+
+# Training data (remove rows with NA from lags)
+train_data <- macro_df %>%
+  slice(1:train_end) %>%
+  drop_na()
+
+# Test data
+test_data <- macro_df %>%
+  slice((train_end + 1):n)
+
+cat("Training observations:", nrow(train_data), "\n")
+cat("Test observations:", nrow(test_data), "\n")
+```
+
+## 8.2 Estimate Model on Training Data
+
+```{r}
+# Re-estimate AR(1) on training data
+ar1_train <- lm(gdp_growth ~ gdp_lag1, data = train_data)
+summary(ar1_train)
+```
+
+## 8.3 Generate Forecasts
+
+```{r}
+# One-step-ahead forecasts
+forecasts <- predict(ar1_train, newdata = test_data)
+
+# Combine with actual values
+forecast_comparison <- data.frame(
+  date = test_data$date,
+  actual = test_data$gdp_growth,
+  forecast = forecasts,
+  error = test_data$gdp_growth - forecasts
+)
+
+kable(forecast_comparison, digits = 2, caption = "Forecast vs Actual")
+```
+
+## 8.4 Forecast Accuracy
+
+```{r}
+# Calculate forecast error metrics
+rmse <- sqrt(mean(forecast_comparison$error^2, na.rm = TRUE))
+mae <- mean(abs(forecast_comparison$error), na.rm = TRUE)
+mape <- mean(abs(forecast_comparison$error / forecast_comparison$actual) * 100, na.rm = TRUE)
+
+cat("Root Mean Squared Error (RMSE):", round(rmse, 3), "\n")
+cat("Mean Absolute Error (MAE):", round(mae, 3), "\n")
+cat("Mean Absolute Percentage Error (MAPE):", round(mape, 1), "%\n")
+```
+
+## 8.5 Plot Forecasts
+
+```{r}
+ggplot(forecast_comparison, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Actual")) +
+  geom_line(aes(y = forecast, color = "Forecast"), linetype = "dashed") +
+  geom_point(aes(y = actual, color = "Actual")) +
+  geom_point(aes(y = forecast, color = "Forecast")) +
+  labs(x = "Date", y = "GDP Growth (%)",
+       title = "GDP Growth: Actual vs Forecast",
+       color = "") +
+  scale_color_manual(values = c("Actual" = "blue", "Forecast" = "red")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+**Question 8:**
+a) How well does the AR(1) model forecast GDP growth?
+b) What is the RMSE, and how would you interpret it?
+c) Looking at the plot, when does the model perform well vs poorly?
+
+# 9. Model Extensions
+
+## 9.1 Using the forecast Package
+
+```{r}
+# Convert to ts object
+gdp_ts <- ts(train_data$gdp_growth, frequency = 4)
+
+# Auto ARIMA selection
+auto_model <- auto.arima(gdp_ts)
+summary(auto_model)
+```
+
+```{r}
+# Generate forecasts
+auto_forecast <- forecast(auto_model, h = 8)
+plot(auto_forecast, main = "ARIMA Forecast of GDP Growth")
+```
+
+## 9.2 Compare Models
+
+```{r}
+# ARIMA forecasts
+arima_forecasts <- as.numeric(auto_forecast$mean)
+
+# Calculate RMSE for ARIMA
+rmse_arima <- sqrt(mean((test_data$gdp_growth - arima_forecasts)^2, na.rm = TRUE))
+
+cat("AR(1) RMSE:", round(rmse, 3), "\n")
+cat("Auto ARIMA RMSE:", round(rmse_arima, 3), "\n")
+```
+
+**Question 9:** Which model produces better forecasts? Why might the simpler AR(1) model sometimes perform as well as more complex ARIMA models?
+
+# Summary Questions
+
+Answer the following questions in complete sentences:
+
+1. **Stationarity**: Why is stationarity important for time series regression? What problems arise if we regress non-stationary series on each other?
+
+2. **Interpretation**: Explain the difference between impact and long-run multipliers in an ADL model. Provide an economic interpretation in the context of unemployment affecting GDP growth.
+
+3. **Serial Correlation**: Why is serial correlation common in time series data? What are the consequences for OLS inference, and how do HAC standard errors address this?
+
+4. **Forecasting**: What is the difference between in-sample fit and out-of-sample forecast accuracy? Why is out-of-sample evaluation important?
+
+5. **Limitations**: Discuss limitations of using simple AR models for economic forecasting. What factors might cause forecast failures during unusual periods (e.g., recessions, crises)?
+
+# Final Deliverables
+
+Submit:
+
+- Fully annotated R code
+- ADF test results and stationarity conclusions
+- AR and ADL model regression output
+- Serial correlation test results
+- Forecast comparison table and plot
+- Written interpretation answers
+
+# Helpful Reminders
+
+- Always test for stationarity before estimating time series models
+- Use HAC standard errors for robust inference with time series data
+- Out-of-sample evaluation is more informative than in-sample fit
+- Simple models often forecast as well as complex ones
+- Be cautious about forecasting during structural breaks or unusual periods
